@@ -16,17 +16,62 @@ from dataclasses import dataclass, asdict
 import time
 from PIL import Image
 import io
+import fitz  # PyMuPDF voor PDF verwerking
 
 # ================================
 # OCR FUNCTIONALITEIT
 # ================================
 
-def extract_text_from_image(image_file, describe_images=True) -> str:
-    """Extract text from image using Gemini's vision capabilities"""
+def pdf_to_images(pdf_file):
+    """Convert PDF pages to images"""
+    pdf_bytes = pdf_file.read()
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    
+    for page_num in range(len(pdf_document)):
+        page = pdf_document[page_num]
+        # Render page to image (higher resolution for better OCR)
+        mat = fitz.Matrix(2.0, 2.0)  # 2x scaling for better quality
+        pix = page.get_pixmap(matrix=mat)
+        img_data = pix.pil_tobytes(format="PNG")
+        img = Image.open(io.BytesIO(img_data))
+        images.append((img, page_num + 1))
+    
+    pdf_document.close()
+    return images
+
+def extract_content_from_file(file, describe_images=True) -> str:
+    """Extract text and describe images from various file types"""
     try:
-        # Convert uploaded file to PIL Image
-        image = Image.open(image_file)
+        file_extension = file.name.lower().split('.')[-1]
         
+        if file_extension == 'pdf':
+            # Convert PDF to images and process each page
+            images = pdf_to_images(file)
+            all_content = []
+            
+            for img, page_num in images:
+                content = extract_content_from_image(img, describe_images, f"Pagina {page_num}")
+                if content:
+                    all_content.append(f"\n--- Pagina {page_num} ---\n{content}")
+            
+            return "\n".join(all_content)
+        
+        elif file_extension in ['png', 'jpg', 'jpeg', 'webp']:
+            # Direct image processing
+            image = Image.open(file)
+            return extract_content_from_image(image, describe_images, file.name)
+        
+        else:
+            return f"Bestandstype {file_extension} wordt niet ondersteund."
+            
+    except Exception as e:
+        st.error(f"Fout bij verwerking van {file.name}: {str(e)}")
+        return ""
+
+def extract_content_from_image(image, describe_images=True, source_name="") -> str:
+    """Extract text and describe visual elements from image using Gemini"""
+    try:
         # Configure model for vision
         model = genai.GenerativeModel('gemini-1.5-flash')
         
@@ -68,30 +113,37 @@ Format je antwoord als volgt:
         if response.text:
             return response.text
         else:
-            return "Geen tekst of visuele elementen gevonden in de afbeelding."
+            return "Geen tekst of visuele elementen gevonden."
             
     except Exception as e:
         st.error(f"Fout bij verwerking: {str(e)}")
         return ""
 
 def process_multiple_documents(uploaded_files, describe_images=True) -> str:
-    """Process multiple document images and combine the extracted text"""
-    all_text = []
+    """Process multiple documents (PDFs and images) and combine the extracted content"""
+    all_content = []
+    total_files = len(uploaded_files)
     
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     for idx, file in enumerate(uploaded_files):
-        progress_bar.progress((idx + 1) / len(uploaded_files))
+        progress = (idx + 1) / total_files
+        progress_bar.progress(progress)
+        status_text.text(f"Verwerken van {file.name}... ({idx + 1}/{total_files})")
         
-        with st.spinner(f"Verwerken van {file.name}..."):
-            extracted_content = extract_text_from_image(file, describe_images)
-            
-            if extracted_content:
-                all_text.append(f"\n{'='*50}\nDocument: {file.name}\n{'='*50}\n{extracted_content}\n")
+        # Reset file pointer
+        file.seek(0)
+        
+        extracted_content = extract_content_from_file(file, describe_images)
+        
+        if extracted_content:
+            all_content.append(f"\n{'='*50}\nDocument: {file.name}\n{'='*50}\n{extracted_content}\n")
     
     progress_bar.empty()
+    status_text.empty()
     
-    return "\n".join(all_text)
+    return "\n".join(all_content)
 
 # ================================
 # PAGINA CONFIGURATIE
@@ -573,48 +625,62 @@ def get_casus_input():
     st.header("📝 Casus Informatie")
     
     # Document upload sectie
-    with st.expander("📷 Upload Documenten (OCR + Beeldbeschrijving)", expanded=False):
+    with st.expander("📷 Upload Documenten (PDF + Afbeeldingen)", expanded=False):
         st.info("""
-        Upload foto's of scans van juridische documenten. De AI zal:
-        - 📄 Tekst automatisch extraheren
-        - 🖼️ Afbeeldingen beschrijven (schade, locaties, producten, etc.)
-        - 🔍 Beide integreren voor complete documentanalyse
+        Upload juridische documenten voor automatische verwerking:
+        - 📄 **PDF bestanden**: Tekst + ingesloten afbeeldingen worden verwerkt
+        - 🖼️ **Afbeeldingen**: JPG, PNG, JPEG, WEBP worden ondersteund
+        - 🔍 **Multimodale analyse**: Zowel tekst als visuele elementen worden geanalyseerd
         """)
         
         uploaded_files = st.file_uploader(
-            "Selecteer afbeeldingen",
-            type=['png', 'jpg', 'jpeg', 'webp'],
+            "Selecteer documenten",
+            type=['pdf', 'png', 'jpg', 'jpeg', 'webp'],
             accept_multiple_files=True,
-            help="Upload contracten, brieven, facturen, schadebeelden, foto's van producten/locaties, etc."
+            help="Upload contracten, brieven, rapporten (PDF) of losse afbeeldingen"
         )
         
         if uploaded_files:
+            # Toon bestandsinfo
+            file_info = []
+            for file in uploaded_files:
+                file_type = "📄 PDF" if file.name.lower().endswith('.pdf') else "🖼️ Afbeelding"
+                file_info.append(f"{file_type} - {file.name}")
+            
+            with st.expander("📁 Geselecteerde bestanden", expanded=True):
+                for info in file_info:
+                    st.text(info)
+            
             # Opties voor verwerking
             col1, col2 = st.columns(2)
             with col1:
                 describe_images = st.checkbox(
                     "🖼️ Beschrijf ook visuele elementen",
                     value=True,
-                    help="Laat AI foto's en afbeeldingen beschrijven (nuttig voor schadebeelden, ongeluksfoto's, etc.)"
+                    help="Laat AI foto's en afbeeldingen in PDFs beschrijven"
                 )
             
             with col2:
                 if st.button("🔍 Start Document Verwerking", type="primary"):
-                    extracted_content = process_multiple_documents(uploaded_files, describe_images)
-                    st.session_state.ocr_text = extracted_content
+                    with st.spinner("Documenten worden verwerkt..."):
+                        extracted_content = process_multiple_documents(uploaded_files, describe_images)
+                        st.session_state.ocr_text = extracted_content
                     
                     # Toon extracted content
                     st.success(f"✅ Verwerking compleet voor {len(uploaded_files)} document(en)")
                     
-                    # Preview van documenten
-                    with st.expander("👁️ Preview Documenten", expanded=False):
-                        cols = st.columns(min(len(uploaded_files), 3))
-                        for idx, (col, file) in enumerate(zip(cols, uploaded_files[:3])):
-                            with col:
-                                image = Image.open(file)
-                                st.image(image, caption=file.name, use_column_width=True)
-                        if len(uploaded_files) > 3:
-                            st.info(f"... en {len(uploaded_files) - 3} meer documenten")
+                    # Preview voor afbeeldingen (niet PDFs)
+                    image_files = [f for f in uploaded_files if not f.name.lower().endswith('.pdf')]
+                    if image_files:
+                        with st.expander("👁️ Preview Afbeeldingen", expanded=False):
+                            cols = st.columns(min(len(image_files), 3))
+                            for idx, (col, file) in enumerate(zip(cols, image_files[:3])):
+                                with col:
+                                    file.seek(0)  # Reset file pointer
+                                    image = Image.open(file)
+                                    st.image(image, caption=file.name, use_column_width=True)
+                            if len(image_files) > 3:
+                                st.info(f"... en {len(image_files) - 3} meer afbeeldingen")
                     
                     # Toon geëxtraheerde content
                     with st.expander("📝 Bekijk Geëxtraheerde Inhoud", expanded=True):
@@ -635,11 +701,11 @@ def get_casus_input():
                     
                     # Analyse tips
                     st.info("""
-                    💡 **Tips voor juridische documentanalyse:**
-                    - Bij **schadebeelden**: De AI beschrijft de aard en omvang van de schade
-                    - Bij **contracten**: Alle clausules en bedingen worden geëxtraheerd  
-                    - Bij **correspondentie**: Data en inhoud worden gestructureerd weergegeven
-                    - Bij **bewijsmateriaal**: Visuele elementen worden objectief beschreven
+                    💡 **Tips voor document verwerking:**
+                    - **PDF bestanden**: Elke pagina wordt apart verwerkt
+                    - **Gemengde content**: Tekst en afbeeldingen worden beide geanalyseerd
+                    - **Schadebeelden in PDFs**: Worden automatisch beschreven
+                    - **Handgeschreven tekst**: Wordt ook herkend (afhankelijk van leesbaarheid)
                     """)
     
     # Check voor voorbeeld casus
@@ -673,16 +739,25 @@ def get_casus_input():
                     # Use Gemini to analyze the OCR text and extract relevant information
                     model = genai.GenerativeModel('gemini-1.5-flash')
                     
-                    analysis_prompt = f"""Analyseer de volgende geëxtraheerde tekst uit juridische documenten en identificeer:
-                    
+                    analysis_prompt = f"""Analyseer de volgende geëxtraheerde content uit juridische documenten.
+Deze content kan zowel tekst als beschrijvingen van afbeeldingen bevatten.
+
+BELANGRIJKE INSTRUCTIES:
+- Identificeer alle juridisch relevante informatie
+- Verwerk zowel tekstuele als visuele informatie (foto beschrijvingen)
+- Bij schadebeelden: noteer de beschreven schade
+- Bij foto's van locaties/producten: gebruik de beschrijvingen
+
+Identificeer:
 1. Namen van partijen (client en tegenpartij)
 2. Rollen van partijen (koper/verkoper, huurder/verhuurder, etc.)
 3. Samenvatting van het conflict
 4. Vorderingen met bedragen
-5. Chronologie van gebeurtenissen
+5. Chronologie van gebeurtenissen  
 6. Genoemde bewijsstukken
+7. Beschrijvingen van schade of relevante visuele elementen
 
-Geëxtraheerde tekst:
+Geëxtraheerde content:
 {st.session_state.ocr_text}
 
 Geef het resultaat in JSON formaat:
@@ -694,7 +769,8 @@ Geef het resultaat in JSON formaat:
     "situatie_samenvatting": "",
     "vorderingen": [],
     "feiten_chronologie": "",
-    "bewijsstukken": []
+    "bewijsstukken": [],
+    "visuele_elementen": ""
 }}"""
                     
                     try:
