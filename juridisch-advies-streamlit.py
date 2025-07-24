@@ -16,29 +16,89 @@ from dataclasses import dataclass, asdict
 import time
 from PIL import Image
 import io
-import fitz  # PyMuPDF voor PDF verwerking
+try:
+    import fitz  # PyMuPDF
+    PDF_SUPPORT = True
+except ImportError:
+    PDF_SUPPORT = False
+    st.warning("⚠️ PyMuPDF niet beschikbaar. PDF ondersteuning is beperkt.")
+import base64
 
 # ================================
 # OCR FUNCTIONALITEIT
 # ================================
 
 def pdf_to_images(pdf_file):
-    """Convert PDF pages to images"""
-    pdf_bytes = pdf_file.read()
-    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    images = []
-    
-    for page_num in range(len(pdf_document)):
-        page = pdf_document[page_num]
-        # Render page to image (higher resolution for better OCR)
-        mat = fitz.Matrix(2.0, 2.0)  # 2x scaling for better quality
-        pix = page.get_pixmap(matrix=mat)
-        img_data = pix.pil_tobytes(format="PNG")
-        img = Image.open(io.BytesIO(img_data))
-        images.append((img, page_num + 1))
-    
-    pdf_document.close()
-    return images
+    """Convert PDF pages to images or use direct PDF processing"""
+    if PDF_SUPPORT:
+        # PyMuPDF available - use it
+        pdf_bytes = pdf_file.read()
+        pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+        images = []
+        
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+            # Render page to image (higher resolution for better OCR)
+            mat = fitz.Matrix(2.0, 2.0)  # 2x scaling for better quality
+            pix = page.get_pixmap(matrix=mat)
+            img_data = pix.pil_tobytes(format="PNG")
+            img = Image.open(io.BytesIO(img_data))
+            images.append((img, page_num + 1))
+        
+        pdf_document.close()
+        return images
+    else:
+        # Fallback: Process PDF directly with Gemini
+        return None
+
+def extract_content_from_pdf_direct(pdf_file, describe_images=True):
+    """Process PDF directly using Gemini's multimodal capabilities"""
+    try:
+        # Read PDF bytes
+        pdf_bytes = pdf_file.read()
+        
+        # Configure model for vision
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Create prompt
+        if describe_images:
+            prompt = """Analyseer dit PDF document en doe het volgende:
+
+1. TEKSTEXTRACTIE: Extract ALLE tekst uit het document
+   - Behoud de originele structuur
+   - Include alle details, data, namen, bedragen, juridische referenties
+   - Vermeld paginanummers waar relevant
+
+2. AFBEELDINGSBESCHRIJVING: Als er visuele elementen zijn:
+   - Beschrijf alle afbeeldingen, foto's, diagrammen in detail
+   - Voor schade: beschrijf aard en omvang
+   - Voor locaties/producten: geef gedetailleerde beschrijving
+   - Wees objectief en feitelijk
+
+Format je antwoord met duidelijke secties per pagina."""
+        else:
+            prompt = """Extract alle tekst uit dit PDF document.
+Behoud de structuur en vermeld paginanummers waar relevant."""
+        
+        # Create a Part object for the PDF
+        pdf_part = {
+            "inline_data": {
+                "data": base64.b64encode(pdf_bytes).decode(),
+                "mime_type": "application/pdf"
+            }
+        }
+        
+        # Generate response
+        response = model.generate_content([prompt, pdf_part])
+        
+        if response.text:
+            return response.text
+        else:
+            return "Geen content gevonden in PDF."
+            
+    except Exception as e:
+        # If direct PDF processing fails, return error
+        return f"PDF verwerking mislukt: {str(e)}"
 
 def extract_content_from_file(file, describe_images=True) -> str:
     """Extract text and describe images from various file types"""
@@ -46,16 +106,20 @@ def extract_content_from_file(file, describe_images=True) -> str:
         file_extension = file.name.lower().split('.')[-1]
         
         if file_extension == 'pdf':
-            # Convert PDF to images and process each page
-            images = pdf_to_images(file)
-            all_content = []
+            # Try to convert PDF to images first
+            if PDF_SUPPORT:
+                images = pdf_to_images(file)
+                if images:
+                    all_content = []
+                    for img, page_num in images:
+                        content = extract_content_from_image(img, describe_images, f"Pagina {page_num}")
+                        if content:
+                            all_content.append(f"\n--- Pagina {page_num} ---\n{content}")
+                    return "\n".join(all_content)
             
-            for img, page_num in images:
-                content = extract_content_from_image(img, describe_images, f"Pagina {page_num}")
-                if content:
-                    all_content.append(f"\n--- Pagina {page_num} ---\n{content}")
-            
-            return "\n".join(all_content)
+            # Fallback: Try direct PDF processing with Gemini
+            file.seek(0)  # Reset file pointer
+            return extract_content_from_pdf_direct(file, describe_images)
         
         elif file_extension in ['png', 'jpg', 'jpeg', 'webp']:
             # Direct image processing
