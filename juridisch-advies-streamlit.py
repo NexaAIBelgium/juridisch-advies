@@ -14,6 +14,84 @@ from pathlib import Path
 import google.generativeai as genai
 from dataclasses import dataclass, asdict
 import time
+from PIL import Image
+import io
+
+# ================================
+# OCR FUNCTIONALITEIT
+# ================================
+
+def extract_text_from_image(image_file, describe_images=True) -> str:
+    """Extract text from image using Gemini's vision capabilities"""
+    try:
+        # Convert uploaded file to PIL Image
+        image = Image.open(image_file)
+        
+        # Configure model for vision
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Create prompt for OCR and image description
+        if describe_images:
+            prompt = """Analyseer deze afbeelding en doe het volgende:
+
+1. TEKSTEXTRACTIE: Extract ALLE tekst die je in de afbeelding ziet. 
+   - Behoud de originele structuur
+   - Include alle details, data, namen, bedragen, en juridische referenties
+   - Tekst in het Nederlands/Vlaams
+
+2. AFBEELDINGSBESCHRIJVING: Als er visuele elementen zijn (foto's, diagrammen, schade, objecten, personen, locaties):
+   - Beschrijf wat je ziet in detail
+   - Voor schadeclaims: beschrijf de aard en omvang van de schade
+   - Voor ongelukken: beschrijf de situatie, posities, omstandigheden
+   - Voor producten: beschrijf de staat, gebreken, of problemen
+   - Wees objectief en feitelijk in je beschrijvingen
+
+Format je antwoord als volgt:
+=== GEËXTRAHEERDE TEKST ===
+[alle tekst uit het document]
+
+=== VISUELE ELEMENTEN ===
+[beschrijving van niet-tekstuele elementen, indien aanwezig]
+"""
+        else:
+            prompt = """Please extract ALL text from this image. 
+        Format the text maintaining the original structure as much as possible.
+        If there are multiple sections, separate them clearly.
+        Include all details, dates, names, amounts, and legal references.
+        
+        Important: Extract text in the original language (likely Dutch/Flemish).
+        """
+        
+        # Generate response
+        response = model.generate_content([prompt, image])
+        
+        if response.text:
+            return response.text
+        else:
+            return "Geen tekst of visuele elementen gevonden in de afbeelding."
+            
+    except Exception as e:
+        st.error(f"Fout bij verwerking: {str(e)}")
+        return ""
+
+def process_multiple_documents(uploaded_files, describe_images=True) -> str:
+    """Process multiple document images and combine the extracted text"""
+    all_text = []
+    
+    progress_bar = st.progress(0)
+    
+    for idx, file in enumerate(uploaded_files):
+        progress_bar.progress((idx + 1) / len(uploaded_files))
+        
+        with st.spinner(f"Verwerken van {file.name}..."):
+            extracted_content = extract_text_from_image(file, describe_images)
+            
+            if extracted_content:
+                all_text.append(f"\n{'='*50}\nDocument: {file.name}\n{'='*50}\n{extracted_content}\n")
+    
+    progress_bar.empty()
+    
+    return "\n".join(all_text)
 
 # ================================
 # PAGINA CONFIGURATIE
@@ -467,6 +545,13 @@ def display_sidebar():
         
         🟢 **Agent 4**: Senior Adviseur
         - Integreert analyses tot strategie
+        
+        ---
+        
+        **📷 OCR Functionaliteit:**
+        - Upload foto's van documenten
+        - AI extraheert automatisch tekst
+        - Intelligent formulier invullen
         """)
         
         st.divider()
@@ -486,6 +571,76 @@ def display_sidebar():
 def get_casus_input():
     """Verzamel casus informatie via formulier"""
     st.header("📝 Casus Informatie")
+    
+    # Document upload sectie
+    with st.expander("📷 Upload Documenten (OCR + Beeldbeschrijving)", expanded=False):
+        st.info("""
+        Upload foto's of scans van juridische documenten. De AI zal:
+        - 📄 Tekst automatisch extraheren
+        - 🖼️ Afbeeldingen beschrijven (schade, locaties, producten, etc.)
+        - 🔍 Beide integreren voor complete documentanalyse
+        """)
+        
+        uploaded_files = st.file_uploader(
+            "Selecteer afbeeldingen",
+            type=['png', 'jpg', 'jpeg', 'webp'],
+            accept_multiple_files=True,
+            help="Upload contracten, brieven, facturen, schadebeelden, foto's van producten/locaties, etc."
+        )
+        
+        if uploaded_files:
+            # Opties voor verwerking
+            col1, col2 = st.columns(2)
+            with col1:
+                describe_images = st.checkbox(
+                    "🖼️ Beschrijf ook visuele elementen",
+                    value=True,
+                    help="Laat AI foto's en afbeeldingen beschrijven (nuttig voor schadebeelden, ongeluksfoto's, etc.)"
+                )
+            
+            with col2:
+                if st.button("🔍 Start Document Verwerking", type="primary"):
+                    extracted_content = process_multiple_documents(uploaded_files, describe_images)
+                    st.session_state.ocr_text = extracted_content
+                    
+                    # Toon extracted content
+                    st.success(f"✅ Verwerking compleet voor {len(uploaded_files)} document(en)")
+                    
+                    # Preview van documenten
+                    with st.expander("👁️ Preview Documenten", expanded=False):
+                        cols = st.columns(min(len(uploaded_files), 3))
+                        for idx, (col, file) in enumerate(zip(cols, uploaded_files[:3])):
+                            with col:
+                                image = Image.open(file)
+                                st.image(image, caption=file.name, use_column_width=True)
+                        if len(uploaded_files) > 3:
+                            st.info(f"... en {len(uploaded_files) - 3} meer documenten")
+                    
+                    # Toon geëxtraheerde content
+                    with st.expander("📝 Bekijk Geëxtraheerde Inhoud", expanded=True):
+                        # Tabs voor verschillende views
+                        tab1, tab2 = st.tabs(["📄 Volledige Output", "🔍 Per Document"])
+                        
+                        with tab1:
+                            st.text_area("Complete inhoud", extracted_content, height=400)
+                        
+                        with tab2:
+                            # Split content per document
+                            documents = extracted_content.split("\n" + "="*50 + "\n")
+                            for doc in documents[1:]:  # Skip first empty split
+                                if doc.strip():
+                                    doc_name = doc.split('\n')[0].replace("Document: ", "")
+                                    with st.expander(f"📄 {doc_name}"):
+                                        st.text(doc)
+                    
+                    # Analyse tips
+                    st.info("""
+                    💡 **Tips voor juridische documentanalyse:**
+                    - Bij **schadebeelden**: De AI beschrijft de aard en omvang van de schade
+                    - Bij **contracten**: Alle clausules en bedingen worden geëxtraheerd  
+                    - Bij **correspondentie**: Data en inhoud worden gestructureerd weergegeven
+                    - Bij **bewijsmateriaal**: Visuele elementen worden objectief beschreven
+                    """)
     
     # Check voor voorbeeld casus
     if st.session_state.get('load_example', False):
@@ -510,25 +665,86 @@ def get_casus_input():
     else:
         example_data = {}
     
+    # AI-assisted form filling
+    if st.session_state.get('ocr_text'):
+        with st.expander("🤖 AI-Assistent voor Formulier Invullen", expanded=False):
+            if st.button("🪄 Analyseer Documenten en Vul Formulier"):
+                with st.spinner("AI analyseert de documenten..."):
+                    # Use Gemini to analyze the OCR text and extract relevant information
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    
+                    analysis_prompt = f"""Analyseer de volgende geëxtraheerde tekst uit juridische documenten en identificeer:
+                    
+1. Namen van partijen (client en tegenpartij)
+2. Rollen van partijen (koper/verkoper, huurder/verhuurder, etc.)
+3. Samenvatting van het conflict
+4. Vorderingen met bedragen
+5. Chronologie van gebeurtenissen
+6. Genoemde bewijsstukken
+
+Geëxtraheerde tekst:
+{st.session_state.ocr_text}
+
+Geef het resultaat in JSON formaat:
+{{
+    "client_naam": "",
+    "client_rol": "",
+    "tegenpartij_naam": "",
+    "tegenpartij_rol": "",
+    "situatie_samenvatting": "",
+    "vorderingen": [],
+    "feiten_chronologie": "",
+    "bewijsstukken": []
+}}"""
+                    
+                    try:
+                        response = model.generate_content(analysis_prompt)
+                        # Parse the JSON response
+                        import re
+                        json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+                        if json_match:
+                            extracted_data = json.loads(json_match.group())
+                            st.session_state.ai_extracted_data = extracted_data
+                            st.success("✅ AI heeft de documenten geanalyseerd!")
+                            st.json(extracted_data)
+                            st.info("De geëxtraheerde informatie is opgeslagen. Je kunt het formulier nu invullen met deze gegevens.")
+                    except Exception as e:
+                        st.error(f"Fout bij AI analyse: {str(e)}")
+    
+    # Get AI extracted data if available
+    ai_data = st.session_state.get('ai_extracted_data', {})
+    
     with st.form("casus_form"):
         col1, col2 = st.columns(2)
         
         with col1:
             st.subheader("🛡️ Uw Cliënt")
-            client_naam = st.text_input("Naam cliënt", value=example_data.get('client_naam', ''))
-            client_rol = st.text_input("Rol cliënt (bv. koper, verhuurder)", value=example_data.get('client_rol', ''))
+            client_naam = st.text_input(
+                "Naam cliënt", 
+                value=example_data.get('client_naam', ai_data.get('client_naam', ''))
+            )
+            client_rol = st.text_input(
+                "Rol cliënt (bv. koper, verhuurder)", 
+                value=example_data.get('client_rol', ai_data.get('client_rol', ''))
+            )
             
         with col2:
             st.subheader("⚔️ De Tegenpartij")
-            tegenpartij_naam = st.text_input("Naam tegenpartij", value=example_data.get('tegenpartij_naam', ''))
-            tegenpartij_rol = st.text_input("Rol tegenpartij", value=example_data.get('tegenpartij_rol', ''))
+            tegenpartij_naam = st.text_input(
+                "Naam tegenpartij", 
+                value=example_data.get('tegenpartij_naam', ai_data.get('tegenpartij_naam', ''))
+            )
+            tegenpartij_rol = st.text_input(
+                "Rol tegenpartij", 
+                value=example_data.get('tegenpartij_rol', ai_data.get('tegenpartij_rol', ''))
+            )
         
         st.subheader("📄 Casus Details")
         
         situatie_samenvatting = st.text_area(
             "Samenvatting van de situatie",
             height=100,
-            value=example_data.get('situatie_samenvatting', ''),
+            value=example_data.get('situatie_samenvatting', ai_data.get('situatie_samenvatting', '')),
             help="Geef een beknopte omschrijving van het conflict"
         )
         
@@ -541,10 +757,14 @@ def get_casus_input():
         
         # Vorderingen
         st.subheader("💰 Vorderingen van de Tegenpartij")
+        default_vorderingen = example_data.get('vorderingen', [])
+        if not default_vorderingen and ai_data.get('vorderingen'):
+            default_vorderingen = ai_data.get('vorderingen', [])
+        
         vorderingen_text = st.text_area(
             "Vorderingen (één per regel)",
             height=100,
-            value='\n'.join(example_data.get('vorderingen', [])) if example_data else '',
+            value='\n'.join(default_vorderingen),
             help="Lijst alle vorderingen van de tegenpartij"
         )
         
@@ -552,16 +772,27 @@ def get_casus_input():
         feitenrelaas = st.text_area(
             "Feitenrelaas",
             height=200,
-            value=example_data.get('feitenrelaas', ''),
+            value=example_data.get('feitenrelaas', ai_data.get('feiten_chronologie', '')),
             help="Chronologisch overzicht van de relevante feiten"
         )
         
         # Bewijsstukken
+        default_bewijsstukken = example_data.get('bewijsstukken', [])
+        if not default_bewijsstukken and ai_data.get('bewijsstukken'):
+            default_bewijsstukken = ai_data.get('bewijsstukken', [])
+            
         bewijsstukken_text = st.text_area(
             "Bewijsstukken (één per regel)",
             height=100,
-            value='\n'.join(example_data.get('bewijsstukken', [])) if example_data else '',
+            value='\n'.join(default_bewijsstukken),
             help="Lijst alle beschikbare bewijsstukken"
+        )
+        
+        # Include OCR text if available
+        include_ocr = st.checkbox(
+            "📎 Voeg geëxtraheerde documenttekst toe aan analyse",
+            value=bool(st.session_state.get('ocr_text')),
+            help="De volledige geëxtraheerde tekst wordt meegestuurd naar de AI agents"
         )
         
         submitted = st.form_submit_button("🚀 Start Analyse", type="primary", use_container_width=True)
@@ -575,6 +806,10 @@ def get_casus_input():
             # Parse vorderingen en bewijsstukken
             vorderingen = [v.strip() for v in vorderingen_text.split('\n') if v.strip()]
             bewijsstukken = [b.strip() for b in bewijsstukken_text.split('\n') if b.strip()]
+            
+            # Add OCR text to feitenrelaas if requested
+            if include_ocr and st.session_state.get('ocr_text'):
+                feitenrelaas += f"\n\n=== GEËXTRAHEERDE DOCUMENTEN ===\n{st.session_state.get('ocr_text')}"
             
             return CasusInput(
                 client_naam=client_naam,
